@@ -1,0 +1,434 @@
+#include "DHT.h"
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include "pitches.h"
+#define MAX_DISTANCE 400
+#define DHTPIN 8
+#define DHTTYPE DHT11
+#define MOTOR_SPEED 40
+int currentNote = 0;
+const int sensorPin = A3;
+const int mr1 = 2;
+const int mr2 = 3;
+const int ml1 = 4;
+const int ml2 = 5;
+const int sl = 6;
+const int sr = 7;
+const int led = 13;
+const int enr = 9;
+const int enl = 10;
+const int vspeed = 75;
+const int tspeed = 70;
+const int fspeed = 60;
+const int tdelay = 20;
+
+// configurable values
+float lightThreshold = 600;
+float tempThreshold = 36;
+float moistureThreshold = 60;
+float searchLightThreshold = 1500;
+
+int melody[] = {
+  NOTE_E5, NOTE_B5, NOTE_A5, NOTE_E5, NOTE_GS5, NOTE_GS5, NOTE_A5, 0,
+  NOTE_E5, NOTE_A5, NOTE_E5, NOTE_GS5, NOTE_GS5, NOTE_A5, 0,
+  NOTE_E5, NOTE_B5, NOTE_A5, NOTE_E5, NOTE_GS5, NOTE_GS5, NOTE_A5, 0,
+  NOTE_E5, NOTE_A5, NOTE_CS6, NOTE_B5, NOTE_A5, NOTE_B5
+};
+
+int noteDurations[] = {
+  8, 8, 8, 8, 6, 6, 8, 8, 8, 8, 8, 6, 6, 8, 8, 8, 8, 8, 8, 6, 6, 8, 8, 8, 8, 8, 6, 6, 8
+};
+
+class UltrasonicSensor {
+public:
+  UltrasonicSensor(int trigPin, int echoPin)
+    : trigPin(trigPin), echoPin(echoPin) {
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+  }
+
+  float getDistance() {
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+    float duration = pulseIn(echoPin, HIGH);
+    float distance = (duration * 0.0343) / 2;
+
+
+
+
+    return distance;
+  }
+
+private:
+  int trigPin;
+  int echoPin;
+};
+
+class DHTSensor {
+private:
+  DHT dht;
+
+public:
+  DHTSensor(uint8_t pin, uint8_t type)
+    : dht(pin, type) {}
+
+  void begin() {
+    dht.begin();
+  }
+
+  float readHumidity() {
+    return dht.readHumidity();
+  }
+
+  float readTemperature(bool isFahrenheit = false) {
+    return dht.readTemperature(isFahrenheit);
+  }
+
+  float computeHeatIndex(float temperature, float humidity, bool isFahrenheit = false) {
+    return dht.computeHeatIndex(temperature, humidity, isFahrenheit);
+  }
+};
+
+class LCDDisplay {
+private:
+  LiquidCrystal_I2C lcd;
+
+public:
+  LCDDisplay(uint8_t address, uint8_t columns, uint8_t rows)
+    : lcd(address, columns, rows) {}
+
+
+  void begin() {
+    lcd.init();
+    lcd.backlight();
+
+    byte fullBlock[8] = {
+      0b11111,
+      0b11111,
+      0b11111,
+      0b11111,
+      0b11111,
+      0b11111,
+      0b11111,
+      0b11111
+    };
+    lcd.createChar(0, fullBlock);
+  }
+
+  void displayError(const String& message) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(message);
+  }
+
+  void displayData(float temperatureC, float moisturePercent) {
+    lcd.clear();
+
+    int tempBarLength = map(temperatureC, 0, 50, 0, 6);
+    lcd.setCursor(0, 0);
+    lcd.print("T: ");
+    lcd.print((int)temperatureC);
+    lcd.print("% ");
+    for (int i = 0; i < tempBarLength; i++) {
+      lcd.write(byte(0));
+    }
+    for (int i = tempBarLength; i < 10; i++) {
+      lcd.print(" ");
+    }
+
+    int moistureBarLength = map(moisturePercent, 0, 100, 0, 6);
+    lcd.setCursor(0, 1);
+    lcd.print("M: ");
+    lcd.print((int)moisturePercent);
+    lcd.print("% ");
+    for (int i = 0; i < moistureBarLength; i++) {
+      lcd.write(byte(0));
+    }
+    for (int i = moistureBarLength; i < 6; i++) {
+      lcd.print(" ");
+    }
+  }
+};
+
+class MoistureSensor {
+private:
+  int sensorPin;
+  int dryValue;
+  int wetValue;
+  int buzzerPin;
+
+public:
+  MoistureSensor(int pin, int dry, int wet, int buzzer)
+    : sensorPin(pin), dryValue(dry), wetValue(wet), buzzerPin(buzzer) {
+    pinMode(buzzerPin, OUTPUT);
+  }
+
+  int readMoisture() {
+    int sensorValue = analogRead(sensorPin);
+    int moisturePercent = map(sensorValue, dryValue, wetValue, 0, 100);
+    int currentNote = 0;
+    if (moisturePercent < 0) moisturePercent = 0;
+    if (moisturePercent > 100) moisturePercent = 100;
+
+    return moisturePercent;
+  }
+};
+
+class Photocell {
+private:
+  int pin;
+public:
+  Photocell(int photocellPin)
+    : pin(photocellPin) {}
+
+
+  int readLightIntensity() {
+    int intensityValueTop = analogRead(pin);
+    return intensityValueTop;
+  }
+};
+
+class Motor {
+public:
+  Motor(int enablePin, int pin1, int pin2)
+    : enablePin(enablePin), pin1(pin1), pin2(pin2) {
+    pinMode(enablePin, OUTPUT);
+    pinMode(pin1, OUTPUT);
+    pinMode(pin2, OUTPUT);
+  }
+
+  void forward(int speed) {
+    digitalWrite(pin1, LOW);
+    digitalWrite(pin2, HIGH);
+    analogWrite(enablePin, speed);
+  }
+
+  void backward(int speed) {
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, LOW);
+    analogWrite(enablePin, speed);
+  }
+
+  void selfRotate(int speed) {
+    digitalWrite(pin1, HIGH);
+    digitalWrite(pin2, HIGH);
+    analogWrite(enablePin, speed);
+  }
+
+  void stop() {
+    analogWrite(enablePin, 0);
+  }
+
+private:
+  int enablePin;
+  int pin1;
+  int pin2;
+};
+
+
+class IRSensor {
+public:
+  IRSensor(int pin)
+    : pin(pin) {
+    pinMode(pin, INPUT);
+  }
+
+
+  int read() {
+    return digitalRead(pin);
+  }
+
+
+private:
+  int pin;
+};
+
+class Robot {
+public:
+  Robot(Motor& leftMotor, Motor& rightMotor, IRSensor& leftSensor, IRSensor& rightSensor, UltrasonicSensor& sensor, DHTSensor& dht, Photocell& TopPhotocell, Photocell& BoTphotocell)
+    : leftMotor(leftMotor), rightMotor(rightMotor), leftSensor(leftSensor), rightSensor(rightSensor), sensor(sensor), dht(dht), TopPhotocell(TopPhotocell), BoTphotocell(BoTphotocell) {}
+
+  void forward() {
+    leftMotor.forward(fspeed);
+    rightMotor.forward(fspeed);
+  }
+
+  void backward() {
+    leftMotor.backward(tspeed);
+    rightMotor.backward(tspeed);
+  }
+
+  void turnLeft() {
+    leftMotor.stop();
+    rightMotor.backward(vspeed);
+    //delay(tdelay);
+  }
+
+  void turnRight() {
+    leftMotor.forward(vspeed);
+    rightMotor.stop();
+    //delay(tdelay);
+  }
+
+  void selfRotate() {
+    leftMotor.forward(vspeed);
+    rightMotor.selfRotate(vspeed);
+  }
+
+  void stop() {
+    leftMotor.stop();
+    rightMotor.stop();
+  }
+
+  void ObstacleAvoidance() {
+    lcd.displayError("Obstacle Avoid.");
+    delay(2000); 
+    int svl = leftSensor.read();
+    int svr = rightSensor.read();
+
+    if (svl == HIGH && svr == HIGH) {
+      backward();
+      delay(500);
+      stop();
+      delay(500);
+    } else if (svl == HIGH && svr == LOW) {
+      turnRight();
+      delay(500);
+      stop();
+      delay(500);
+    } else if (svl == LOW && svr == HIGH) {
+      turnLeft();
+      delay(500);
+      stop();
+      delay(500);
+    }
+  }
+
+  void search() {
+    selfRotate();
+    forward();
+    stop();
+  }
+
+  void distanceSensor() {
+    backward();
+    delay(1000);
+    turnRight();
+    delay(100);
+  }
+  void update() {
+
+    float distance = sensor.getDistance();
+    float temperatureC = dht.readTemperature();
+    float lightIntensity = TopPhotocell.readLightIntensity();
+
+    if (temperatureC <= tempThreshold && lightIntensity > lightThreshold) {
+      stop();
+
+    } else if (distance < 30 && distance != 0) {
+      distanceSensor();
+
+    } else if (temperatureC > tempThreshold && lightIntensity > lightThreshold) {  // too hot enough light
+      lcd.displayError("Searching Shade");
+      delay(2000); 
+      search();
+
+    } else if (temperatureC <= tempThreshold && lightIntensity < lightThreshold) {  // ok temp low light
+      lcd.displayError("Searching Light");
+      delay(2000);
+      search();
+    }
+  }
+
+private:
+  Motor& leftMotor;
+  Motor& rightMotor;
+  IRSensor& leftSensor;
+  IRSensor& rightSensor;
+  UltrasonicSensor& sensor;
+  DHTSensor& dht;
+  Photocell& TopPhotocell;
+  Photocell& BoTphotocell;
+};
+
+UltrasonicSensor sensor(13, 12);
+DHTSensor dht(DHTPIN, DHTTYPE);
+LCDDisplay lcd(0x27, 16, 2);
+MoistureSensor moisture(sensorPin, 1023, 300, 11);
+Motor leftMotor(enl, ml1, ml2);
+Motor rightMotor(enr, mr1, mr2);
+IRSensor leftSensor(sl);
+IRSensor rightSensor(sr);
+Photocell TopPhotocell(A0);
+Photocell BoTphotocell(A1);
+Robot robot(leftMotor, rightMotor, leftSensor, rightSensor, sensor, dht, TopPhotocell, BoTphotocell);
+
+void setup() {
+  Serial.begin(9600);
+  dht.begin();
+  lcd.begin();
+  pinMode(led, OUTPUT);
+}
+
+void loop() {
+  robot.ObstacleAvoidance();
+  robot.update();
+
+  int moisturePercent = moisture.readMoisture();
+  float humidity = dht.readHumidity();
+  float temperatureC = dht.readTemperature();
+  float temperatureF = dht.readTemperature(true);
+  int lightInten = TopPhotocell.readLightIntensity();
+  int lightInten1 = BoTphotocell.readLightIntensity();
+
+  if (isnan(humidity) || isnan(temperatureC) || isnan(temperatureF)) {
+    Serial.println("！");
+    lcd.displayError("DHT");
+  } else {
+    float distance = sensor.getDistance();
+    float heatIndexC = dht.computeHeatIndex(temperatureC, humidity, false);
+    float heatIndexF = dht.computeHeatIndex(temperatureF, humidity);
+    Serial.println(lightInten);
+    Serial.println(lightInten1);
+    Serial.print("Analog Value: ");
+    Serial.print(analogRead(sensorPin));
+    Serial.print(" | Moisture: ");
+    Serial.print(moisturePercent);
+    Serial.println("%");
+    Serial.print("Distance: ");
+    Serial.print(distance);
+    Serial.println(" cm");
+    Serial.print("Humidity: ");
+    Serial.print(humidity);
+    Serial.print("%  ");
+    Serial.print("Temperature: ");
+    Serial.print(temperatureC);
+    Serial.print("°C / ");
+    Serial.print(temperatureF);
+    Serial.print("°F  ");
+    Serial.print("Heat Index: ");
+    Serial.print(heatIndexC);
+    Serial.print("°C / ");
+    Serial.print(heatIndexF);
+    Serial.println("°F");
+    Serial.println("===========================");
+
+   lcd.displayData(temperatureC, moisturePercent);
+  }
+
+  if (moisturePercent < moistureThreshold) {
+    int noteDuration = 2000 / noteDurations[currentNote];
+    tone(11, melody[currentNote], noteDuration);
+    currentNote++;
+    if (currentNote >= 4) {
+      currentNote = 0;  
+    }
+  } else {
+    noTone(11);
+    currentNote = 0; 
+  }
+
+}
